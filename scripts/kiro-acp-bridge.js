@@ -248,7 +248,8 @@ async function startAcp({ agent, model, trustAllTools = true, verbose = 0 } = {}
 
 async function createSession({ cwd, mode, mcpServers = [] } = {}) {
   if (!acpReady) throw new Error('ACP is not ready');
-  if (!cwd || !path.isAbsolute(cwd)) throw new Error('session_new requires absolute cwd');
+  if (!cwd) cwd = process.cwd();
+  if (!path.isAbsolute(cwd)) throw new Error('session_new requires absolute cwd');
 
   const result = await rpc('session/new', { cwd, mcpServers });
   currentSessionId = result?.sessionId || null;

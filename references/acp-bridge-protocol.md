@@ -61,6 +61,7 @@ Validated from ACP docs:
 ```json
 {"op":"session_new","cwd":"/absolute/path/project","mode":"semi-auto","mcpServers":[]}
 ```
+`cwd` is optional — defaults to `process.cwd()` (the bridge's working directory). If provided, must be an absolute path.
 
 ### session_load
 ```json

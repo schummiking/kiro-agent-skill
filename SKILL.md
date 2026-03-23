@@ -206,6 +206,7 @@ Look for `{"type":"ready",...}` in the output.
 ```bash
 echo '{"op":"session_new","cwd":"/absolute/path/project"}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
+`cwd` is optional — if omitted, defaults to the bridge process's working directory (set by `workdir:` in the launch command). If provided, must be an absolute path.
 
 **Step 5** — Send a prompt:
 ```bash
@@ -244,6 +245,24 @@ Same as multi-turn but streamlined: `session_new` → `send` → wait for `promp
 5. `stop` to shut down the bridge
 
 **Key advantage over CLI non-interactive:** the session is naturally preserved. If the user later says "继续上次的", you can start a new bridge and use `session_load` to resume — no context is lost. CLI non-interactive discards the session entirely.
+
+#### Bridge lifecycle — when to stop
+
+| Scenario | When to send `op:stop` |
+| --- | --- |
+| One-shot task | Immediately after `prompt_completed` — bridge is disposable |
+| Multi-turn (all modes) | Keep bridge running between turns. Only stop when: |
+| | • User explicitly says "结束 Kiro" / "关闭 Kiro" / "stop Kiro" |
+| | • User starts a completely unrelated project (stop old bridge, start new) |
+| | • OpenClaw conversation ends or user leaves |
+| Manual mode | Same as multi-turn — bridge stays alive until user says done |
+
+**Key principle:** In multi-turn scenarios, the bridge is a long-lived daemon. Do NOT stop it after each prompt — the user may come back minutes or hours later with a follow-up. The 30s heartbeat keeps it alive indefinitely.
+
+**If the bridge dies unexpectedly** (crash, system kill, etc.):
+1. Start a new bridge
+2. Use `session_load` with the previous session ID (from state file or `kiro-cli chat --list-sessions`)
+3. Continue where you left off — session data lives on Kiro's server, not in the bridge
 
 #### Bridge state and notifications
 
