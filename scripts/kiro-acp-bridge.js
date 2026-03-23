@@ -49,6 +49,7 @@ let bridgeInitiatedKill = false;
 let sigTermCount = 0;
 let firstSigTermTime = null;
 let sigTermTimeoutTimer = null;
+let fifoFallbackCreated = false;
 let heartbeatTimer;
 
 function parseArgs(argv) {
@@ -330,6 +331,17 @@ async function gracefulShutdown(reason) {
       sigTermCount++;
       gracefulShutdown('SIGTERM_TIMEOUT');
     }, 60_000);
+    // Proactive FIFO fallback: establish backup control channel in case stdio session dies
+    if (controlMode === 'stdio' && !fifoFallbackCreated) {
+      const fallbackPath = `/tmp/kiro-acp-bridge-${process.pid}.fifo`;
+      try {
+        setupFifoControl(fallbackPath);
+        fifoFallbackCreated = true;
+        emit({ type: 'control_channel', mode: 'fifo', path: fallbackPath, reason: 'sigterm_recovery' });
+      } catch (err) {
+        emit({ type: 'bridge_error', message: `SIGTERM recovery FIFO failed: ${err.message}` });
+      }
+    }
     return; // absorbed, do not shutdown
   }
 
@@ -365,6 +377,10 @@ async function gracefulShutdown(reason) {
 
   if (controlMode === 'fifo' && controlPath) {
     try { fs.unlinkSync(controlPath); } catch {}
+  }
+  if (fifoFallbackCreated) {
+    const fallbackPath = `/tmp/kiro-acp-bridge-${process.pid}.fifo`;
+    try { fs.unlinkSync(fallbackPath); } catch {}
   }
 
   emit({ type: 'shutdown', reason, session: currentSessionId, pid: acp?.pid || null });
@@ -494,10 +510,15 @@ if (controlMode === 'fifo') {
   emit({ type: 'control_channel', mode: 'stdio' });
   rl.on('close', () => {
     emit({ type: 'info', message: 'stdin closed (EOF), bridge remains running via keepalive' });
+    if (fifoFallbackCreated) {
+      emit({ type: 'info', message: 'FIFO fallback already created (SIGTERM recovery), skipping' });
+      return;
+    }
     // Auto-fallback: create FIFO control channel so bridge remains controllable
     const fallbackPath = `/tmp/kiro-acp-bridge-${process.pid}.fifo`;
     try {
       setupFifoControl(fallbackPath);
+      fifoFallbackCreated = true;
       emit({ type: 'control_channel', mode: 'fifo', path: fallbackPath });
       // Self-diagnostic ping to prove bridge is still controllable
       processCommand(JSON.stringify({ op: 'ping' }));

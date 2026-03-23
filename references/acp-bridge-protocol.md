@@ -159,6 +159,16 @@ Validated from ACP docs:
 {"type":"bridge_error","op":"send","message":"No session id"}
 ```
 
+### control_channel
+```json
+{"type":"control_channel","mode":"stdio"}
+```
+Or after SIGTERM absorption (recovery FIFO):
+```json
+{"type":"control_channel","mode":"fifo","path":"/tmp/kiro-acp-bridge-PID.fifo","reason":"sigterm_recovery"}
+```
+The `reason` field is present only when the FIFO was created as a recovery mechanism after SIGTERM absorption. When the bridge absorbs a SIGTERM (`deferred: true`), it proactively creates a FIFO backup control channel so that even if the original stdio session dies, the bridge remains controllable.
+
 ## State file
 
 The bridge writes a tiny local state file:
