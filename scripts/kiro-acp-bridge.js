@@ -45,6 +45,7 @@ let pending = new Map();
 let currentSessionId = null;
 let sessions = {};
 let shuttingDown = false;
+let bridgeInitiatedKill = false;
 let heartbeatTimer;
 
 function parseArgs(argv) {
@@ -197,6 +198,7 @@ async function startAcp({ agent, model, trustAllTools = true, verbose = 0 } = {}
     stdio: ['pipe', 'pipe', 'pipe'],
     env: process.env,
     cwd: process.cwd(),
+    detached: true,
   });
 
   acp.stdout.setEncoding('utf8');
@@ -207,15 +209,18 @@ async function startAcp({ agent, model, trustAllTools = true, verbose = 0 } = {}
 
   acp.on('exit', (code, signal) => {
     acpReady = false;
+    const terminatedBy = bridgeInitiatedKill ? 'bridge'
+      : signal ? 'external'
+      : 'self';
     for (const [, p] of pending.entries()) {
       p.reject(new Error(`ACP exited before response (method=${p.method}, code=${code}, signal=${signal})`));
     }
     pending.clear();
     saveState();
-    emit({ type: 'exit', code, signal });
+    emit({ type: 'exit', code, signal, terminatedBy });
 
     // L3 auto-notification: notify user when ACP process exits
-    notifyUser(`ACP process exited (code=${code}, signal=${signal}, session=${currentSessionId || 'none'})`);
+    notifyUser(`ACP process exited (code=${code}, signal=${signal}, terminatedBy=${terminatedBy}, session=${currentSessionId || 'none'})`);
   });
 
   acp.on('error', (err) => emit({ type: 'error', message: err.message }));
@@ -308,11 +313,37 @@ async function gracefulShutdown(reason) {
 
   clearInterval(heartbeatTimer);
 
+  // Signal observability event — emitted before shutdown event
+  emit({
+    type: 'bridge_signal_received',
+    signal: reason,
+    pendingCalls: pending.size,
+    timestamp: new Date().toISOString(),
+  });
+
+  // Grace period: wait for pending RPCs to complete (up to 30s)
+  if (pending.size > 0) {
+    const GRACE_TIMEOUT_MS = 30_000;
+    await Promise.race([
+      new Promise((resolve) => {
+        const check = setInterval(() => {
+          if (pending.size === 0) { clearInterval(check); resolve(); }
+        }, 1000);
+      }),
+      new Promise((resolve) => setTimeout(() => {
+        emit({ type: 'info', message: `Grace period timeout (${GRACE_TIMEOUT_MS}ms), forcing shutdown` });
+        resolve();
+      }, GRACE_TIMEOUT_MS)),
+    ]);
+  }
+
   if (controlMode === 'fifo' && controlPath) {
     try { fs.unlinkSync(controlPath); } catch {}
   }
 
   emit({ type: 'shutdown', reason, session: currentSessionId, pid: acp?.pid || null });
+
+  bridgeInitiatedKill = true;
 
   if (acp && !acp.killed) {
     acp.kill('SIGTERM');
@@ -331,6 +362,7 @@ async function gracefulShutdown(reason) {
 function stopBridge() {
   clearInterval(heartbeatTimer);
   emit({ type: 'stop_requested', session: currentSessionId, pid: acp?.pid || null });
+  bridgeInitiatedKill = true;
   if (acp && !acp.killed) acp.kill('SIGTERM');
 }
 
