@@ -314,8 +314,8 @@ async function cancelSession({ session } = {}) {
 async function gracefulShutdown(reason) {
   if (shuttingDown) return;
 
-  // SIGTERM absorption: if active session, no pending RPCs, first SIGTERM → absorb
-  if (reason === 'SIGTERM' && acpReady && currentSessionId && pending.size === 0 && sigTermCount === 0) {
+  // SIGTERM absorption: if ACP initialized and first SIGTERM → absorb (regardless of session state or pending RPCs)
+  if (reason === 'SIGTERM' && acpReady && sigTermCount === 0) {
     sigTermCount++;
     firstSigTermTime = Date.now();
     emit({
