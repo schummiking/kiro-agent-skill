@@ -53,7 +53,7 @@ These three things are **different**. Never treat them as interchangeable:
 
 | Priority | Scenario | Transport |
 | --- | --- | --- |
-| **MANDATORY (all scenarios)** | One-shot AND multi-turn | ACP bridge-as-process: `exec(background:true)` + `node scripts/kiro-acp-bridge.js`. The ONLY transport layer for every surface and scenario. |
+| **MANDATORY (all scenarios)** | One-shot AND multi-turn | ACP bridge-as-process: `exec(background:true)` + `setsid node scripts/kiro-acp-bridge.js`. The ONLY transport layer for every surface and scenario. |
 | OPTIONAL ALTERNATIVE | Multi-turn on Desktop/Web only (surfaces that support `sessions_spawn`) | `sessions_spawn` ACP / direct `kiro-cli acp --agent ... --model ... --trust-all-tools`. **PROHIBITED on Telegram.** |
 | Never use interactive TUI chat as a transport inside this skill | | |
 
@@ -182,7 +182,7 @@ Bridge protocol details: [references/acp-bridge-protocol.md](references/acp-brid
 
 **Step 1** — Launch bridge as background process:
 ```bash
-bash workdir:~/project background:true command:"node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js"
+bash workdir:~/project background:true command:"setsid node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js"
 ```
 
 **Step 2** — Send `start` command to launch the ACP process:

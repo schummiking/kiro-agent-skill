@@ -221,7 +221,7 @@ The bridge is designed to run as a background process managed by OpenClaw's `exe
 
 ```bash
 # 1. Launch bridge as background process
-bash workdir:~/project background:true command:"node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js"
+bash workdir:~/project background:true command:"setsid node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js"
 
 # 2. Start ACP process
 process action:submit sessionId:XXX input:'{"op":"start","agent":"kiro_default","model":"claude-opus-4.6","trustAllTools":true}'

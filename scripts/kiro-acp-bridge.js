@@ -46,6 +46,9 @@ let currentSessionId = null;
 let sessions = {};
 let shuttingDown = false;
 let bridgeInitiatedKill = false;
+let sigTermCount = 0;
+let firstSigTermTime = null;
+let sigTermTimeoutTimer = null;
 let heartbeatTimer;
 
 function parseArgs(argv) {
@@ -309,7 +312,29 @@ async function cancelSession({ session } = {}) {
 
 async function gracefulShutdown(reason) {
   if (shuttingDown) return;
+
+  // SIGTERM absorption: if active session, no pending RPCs, first SIGTERM → absorb
+  if (reason === 'SIGTERM' && acpReady && currentSessionId && pending.size === 0 && sigTermCount === 0) {
+    sigTermCount++;
+    firstSigTermTime = Date.now();
+    emit({
+      type: 'bridge_signal_received',
+      signal: reason,
+      pendingCalls: pending.size,
+      timestamp: new Date().toISOString(),
+      deferred: true,
+    });
+    // Auto-shutdown after 60s if no second SIGTERM
+    sigTermTimeoutTimer = setTimeout(() => {
+      emit({ type: 'info', message: 'SIGTERM absorption timeout (60s), executing shutdown' });
+      sigTermCount++;
+      gracefulShutdown('SIGTERM_TIMEOUT');
+    }, 60_000);
+    return; // absorbed, do not shutdown
+  }
+
   shuttingDown = true;
+  if (sigTermTimeoutTimer) { clearTimeout(sigTermTimeoutTimer); sigTermTimeoutTimer = null; }
 
   clearInterval(heartbeatTimer);
 
@@ -319,6 +344,7 @@ async function gracefulShutdown(reason) {
     signal: reason,
     pendingCalls: pending.size,
     timestamp: new Date().toISOString(),
+    deferred: false,
   });
 
   // Grace period: wait for pending RPCs to complete (up to 30s)
