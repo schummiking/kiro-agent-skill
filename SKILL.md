@@ -30,7 +30,7 @@ These three things are **different**. Never treat them as interchangeable:
 | --- | --- | --- |
 | **ACP protocol** | The JSON-RPC protocol itself (`initialize`, `session/new`, `session/prompt`, etc.) | None — surface-agnostic |
 | **Direct ACP via `sessions_spawn`** | OpenClaw's native ACP thread binding. Calls `sessions_spawn(runtime:"acp")` to create a thread-bound ACP session. | **Surface-dependent** — requires thread support. NOT supported on Telegram. |
-| **ACP bridge-as-process** | The bridge script (`kiro-acp-bridge.js`) running as a background process via `exec(background:true)`. Communicates over stdin/stdout JSONL. | None — surface-agnostic, works everywhere. |
+| **ACP bridge-as-process** | The bridge script (`kiro-acp-bridge.js`) running as a background process via `exec(background:true)`. Control input via FIFO, event output via stdout JSONL. | None — surface-agnostic, works everywhere. |
 
 **Critical rule: "use ACP" means "use ACP bridge", NOT "try `sessions_spawn` first".**
 
@@ -53,7 +53,7 @@ These three things are **different**. Never treat them as interchangeable:
 
 | Priority | Scenario | Transport |
 | --- | --- | --- |
-| **MANDATORY (all scenarios)** | One-shot AND multi-turn | ACP bridge-as-process: `exec(background:true)` + `setsid node scripts/kiro-acp-bridge.js`. The ONLY transport layer for every surface and scenario. |
+| **MANDATORY (all scenarios)** | One-shot AND multi-turn | ACP bridge-as-process: `exec(background:true)` + `setsid node scripts/kiro-acp-bridge.js --control fifo`. The ONLY transport layer for every surface and scenario. |
 | OPTIONAL ALTERNATIVE | Multi-turn on Desktop/Web only (surfaces that support `sessions_spawn`) | `sessions_spawn` ACP / direct `kiro-cli acp --agent ... --model ... --trust-all-tools`. **PROHIBITED on Telegram.** |
 | Never use interactive TUI chat as a transport inside this skill | | |
 
@@ -130,7 +130,7 @@ Check in this order (bridge first):
 ```bash
 process action:list
 ```
-Look for a running `kiro-acp-bridge.js` process. If found → send the follow-up via `process action:submit` with a `send` or `reply` JSONL command to the bridge. Done.
+Look for a running `kiro-acp-bridge.js` process. If found → send the follow-up via FIFO write (`echo '{"op":"send",...}' > /tmp/kiro-acp-bridge-PID.fifo`) with a `send` or `reply` JSONL command to the bridge. Done.
 
 **2b — Check for bridge state file (if no running bridge):**
 
@@ -182,12 +182,18 @@ Bridge protocol details: [references/acp-bridge-protocol.md](references/acp-brid
 
 **Step 1** — Launch bridge as background process:
 ```bash
-bash workdir:~/project background:true command:"setsid node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js"
+bash workdir:~/project background:true command:"setsid node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js --control fifo"
 ```
+
+**Step 1.5** — Read log to get FIFO control path:
+```bash
+process action:log sessionId:XXX
+```
+Look for `{"type":"control_channel","mode":"fifo","path":"/tmp/kiro-acp-bridge-PID.fifo"}` in the output. Extract the FIFO path for subsequent commands.
 
 **Step 2** — Send `start` command to launch the ACP process:
 ```bash
-process action:submit sessionId:XXX input:'{"op":"start","agent":"kiro_default","model":"claude-opus-4.6","trustAllTools":true}'
+echo '{"op":"start","agent":"kiro_default","model":"claude-opus-4.6","trustAllTools":true}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
 
 **Step 3** — Confirm `ready` event:
@@ -198,12 +204,12 @@ Look for `{"type":"ready",...}` in the output.
 
 **Step 4** — Create a new session:
 ```bash
-process action:submit sessionId:XXX input:'{"op":"session_new","cwd":"/absolute/path/project"}'
+echo '{"op":"session_new","cwd":"/absolute/path/project"}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
 
 **Step 5** — Send a prompt:
 ```bash
-process action:submit sessionId:XXX input:'{"op":"send","session":"sess_xxx","text":"Your task here"}'
+echo '{"op":"send","session":"sess_xxx","text":"Your task here"}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
 
 **Step 6** — Read `session_update` and `prompt_completed` events:
@@ -214,17 +220,17 @@ Look for `{"type":"session_update",...}` (streaming progress) and `{"type":"prom
 
 **Step 7** — For follow-ups, send more `send` or `reply` commands:
 ```bash
-process action:submit sessionId:XXX input:'{"op":"send","session":"sess_xxx","text":"Now do this follow-up"}'
+echo '{"op":"send","session":"sess_xxx","text":"Now do this follow-up"}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
 
 **Step 8** — To resume a previous session later:
 ```bash
-process action:submit sessionId:XXX input:'{"op":"session_load","session":"sess_xxx","cwd":"/absolute/path/project"}'
+echo '{"op":"session_load","session":"sess_xxx","cwd":"/absolute/path/project"}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
 
 **Step 9** — To stop the bridge:
 ```bash
-process action:submit sessionId:XXX input:'{"op":"stop"}'
+echo '{"op":"stop"}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
 
 #### One-shot-via-bridge workflow
@@ -250,7 +256,7 @@ Same as multi-turn but streamlined: `session_new` → `send` → wait for `promp
 When using the bridge, specify the agent in the `start` command:
 
 ```bash
-process action:submit sessionId:XXX input:'{"op":"start","agent":"backend-specialist","model":"claude-opus-4.6","trustAllTools":true}'
+echo '{"op":"start","agent":"backend-specialist","model":"claude-opus-4.6","trustAllTools":true}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
 
 On Desktop/Web only (where `sessions_spawn` is supported), you may alternatively use:

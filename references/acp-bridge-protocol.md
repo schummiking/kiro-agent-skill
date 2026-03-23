@@ -2,7 +2,7 @@
 
 ## Goal
 
-Provide the smallest useful bridge between OpenClaw and `kiro-cli acp` using stdio + JSON-RPC.
+Provide the smallest useful bridge between OpenClaw and `kiro-cli acp` using FIFO for control input and stdout for event output, with JSON-RPC over the ACP subprocess.
 
 ## Why this exists
 
@@ -231,33 +231,37 @@ The bridge is designed to run as a background process managed by OpenClaw's `exe
 
 ```bash
 # 1. Launch bridge as background process
-bash workdir:~/project background:true command:"setsid node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js"
+bash workdir:~/project background:true command:"setsid node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js --control fifo"
+
+# 1.5. Read log to get FIFO control path
+process action:log sessionId:XXX
+# Look for: {"type":"control_channel","mode":"fifo","path":"/tmp/kiro-acp-bridge-PID.fifo"}
 
 # 2. Start ACP process
-process action:submit sessionId:XXX input:'{"op":"start","agent":"kiro_default","model":"claude-opus-4.6","trustAllTools":true}'
+echo '{"op":"start","agent":"kiro_default","model":"claude-opus-4.6","trustAllTools":true}' > /tmp/kiro-acp-bridge-PID.fifo
 
 # 3. Confirm ready
 process action:log sessionId:XXX
 # Look for: {"type":"ready",...}
 
 # 4. Create session
-process action:submit sessionId:XXX input:'{"op":"session_new","cwd":"/absolute/path/project"}'
+echo '{"op":"session_new","cwd":"/absolute/path/project"}' > /tmp/kiro-acp-bridge-PID.fifo
 
 # 5. Send prompt
-process action:submit sessionId:XXX input:'{"op":"send","session":"sess_xxx","text":"Your task here"}'
+echo '{"op":"send","session":"sess_xxx","text":"Your task here"}' > /tmp/kiro-acp-bridge-PID.fifo
 
 # 6. Read output
 process action:log sessionId:XXX
 # Look for: {"type":"session_update",...} and {"type":"prompt_completed",...}
 
 # 7. Follow-up prompts
-process action:submit sessionId:XXX input:'{"op":"send","session":"sess_xxx","text":"Follow-up task"}'
+echo '{"op":"send","session":"sess_xxx","text":"Follow-up task"}' > /tmp/kiro-acp-bridge-PID.fifo
 
 # 8. Resume a previous session
-process action:submit sessionId:XXX input:'{"op":"session_load","session":"sess_xxx","cwd":"/absolute/path/project"}'
+echo '{"op":"session_load","session":"sess_xxx","cwd":"/absolute/path/project"}' > /tmp/kiro-acp-bridge-PID.fifo
 
 # 9. Stop bridge
-process action:submit sessionId:XXX input:'{"op":"stop"}'
+echo '{"op":"stop"}' > /tmp/kiro-acp-bridge-PID.fifo
 ```
 
 ### One-shot-via-bridge
