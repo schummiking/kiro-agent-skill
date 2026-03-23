@@ -22,13 +22,50 @@ If the user explicitly says **Kiro**, prefer this skill over `coding-agent`.
 
 Binary: `kiro-cli` (at `~/.local/bin/kiro-cli`)
 
+## Three ACP concepts — do not conflate
+
+These three things are **different**. Never treat them as interchangeable:
+
+| Concept | What it is | Surface dependency |
+| --- | --- | --- |
+| **ACP protocol** | The JSON-RPC protocol itself (`initialize`, `session/new`, `session/prompt`, etc.) | None — surface-agnostic |
+| **Direct ACP via `sessions_spawn`** | OpenClaw's native ACP thread binding. Calls `sessions_spawn(runtime:"acp")` to create a thread-bound ACP session. | **Surface-dependent** — requires thread support. NOT supported on Telegram. |
+| **ACP bridge-as-process** | The bridge script (`kiro-acp-bridge.js`) running as a background process via `exec(background:true)`. Communicates over stdin/stdout JSONL. | None — surface-agnostic, works everywhere. |
+
+**Critical rule: "use ACP" means "use ACP bridge", NOT "try `sessions_spawn` first".**
+
+## Surface capability pre-check (MANDATORY first step)
+
+**Before selecting any transport, you MUST check the current surface's capabilities:**
+
+1. **Identify current surface**: Desktop/Web, Telegram, or other restricted surface
+2. **Check direct ACP support**: Does this surface support `sessions_spawn(runtime:"acp")` with thread binding?
+   - Desktop/Web: ✅ Supported
+   - Telegram: ❌ NOT supported — **PROHIBITED**
+   - Other restricted surfaces: ❌ Assume NOT supported
+3. **Select transport based on pre-check result**:
+   - All surfaces → ACP bridge (MANDATORY)
+   - Desktop/Web only → may optionally use `sessions_spawn` ACP as alternative
+
+**On Telegram / chat surfaces: MUST use ACP bridge. Do NOT attempt direct ACP thread spawn (`sessions_spawn(runtime:"acp")`). This is PROHIBITED, not optional.**
+
 ## Transport routing
 
-| Scenario | Transport |
-| --- | --- |
-| Multi-turn agent orchestration | `kiro-cli acp` (preferred) |
-| One-shot task | `kiro-cli chat --no-interactive --trust-all-tools '...'` |
-| Never use interactive TUI chat as a transport inside this skill | |
+| Priority | Scenario | Transport |
+| --- | --- | --- |
+| **MANDATORY (all scenarios)** | One-shot AND multi-turn | ACP bridge-as-process: `exec(background:true)` + `node scripts/kiro-acp-bridge.js`. The ONLY transport layer for every surface and scenario. |
+| OPTIONAL ALTERNATIVE | Multi-turn on Desktop/Web only (surfaces that support `sessions_spawn`) | `sessions_spawn` ACP / direct `kiro-cli acp --agent ... --model ... --trust-all-tools`. **PROHIBITED on Telegram.** |
+| Never use interactive TUI chat as a transport inside this skill | | |
+
+### Routing matrix (surface × scenario)
+
+| Surface | Multi-turn | One-shot | Session resume |
+| --- | --- | --- | --- |
+| Desktop / Web | Bridge (MANDATORY) or `sessions_spawn` ACP (optional alternative) | Bridge one-shot-via-bridge | Bridge `session_load` |
+| Telegram | Bridge (MANDATORY) — direct ACP spawn **PROHIBITED** | Bridge one-shot-via-bridge | Bridge `session_load` |
+| Other restricted surfaces | Bridge (MANDATORY) | Bridge one-shot-via-bridge | Bridge `session_load` |
+
+**Routing rule:** Bridge is the ONLY transport. No fallback. If bridge fails, that's a bug to fix — not a scenario to work around.
 
 ## Mode selection
 
@@ -49,8 +86,8 @@ For detailed mode definitions, escalation policies, and prompting templates, see
 | --- | --- |
 | 继续/接着做/上次那个 Kiro 任务 | **Run session continuity check** (see below) |
 | 用 Kiro 改/修/做 XXX | Start Kiro task (one-shot or ACP per complexity) |
-| 用 Kiro 一次跑完 / one-shot | `kiro-cli chat --no-interactive --trust-all-tools '...'` |
-| 用某个 Kiro agent 干活 | `kiro-cli chat --agent NAME --no-interactive --trust-all-tools '...'` |
+| 用 Kiro 一次跑完 / one-shot | Bridge one-shot-via-bridge (唯一传输方式) |
+| 用某个 Kiro agent 干活 | Bridge: `{"op":"start","agent":"backend-specialist",...}` |
 | 看 Kiro 会话 | `kiro-cli chat --list-sessions` |
 | 恢复 Kiro 会话 | `kiro-cli chat --resume` |
 | 删除 Kiro 会话 | `kiro-cli chat --delete-session ID` (confirm first) |
@@ -60,7 +97,9 @@ For detailed mode definitions, escalation policies, and prompting templates, see
 | 看/改默认 agent | `kiro-cli settings chat.defaultAgent [VALUE]` |
 | 看 Kiro 设置 | `kiro-cli settings list [--all]` |
 | Kiro MCP | `kiro-cli mcp list/add/remove/status ...` |
-| Kiro ACP | `kiro-cli acp [--agent X --model Y --trust-all-tools]` |
+| Kiro ACP | ACP bridge workflow (MANDATORY); direct `kiro-cli acp` (optional alternative on Desktop/Web only, PROHIBITED on Telegram) |
+| Kiro bridge / Kiro ACP bridge / 用 bridge 跑 | Start ACP bridge workflow (see bridge section) |
+| Kiro bridge 恢复 / bridge resume | Check bridge state file, `session_load` via bridge |
 | 看 Kiro 身份 | `kiro-cli whoami` / `kiro-cli profile` |
 | 登录/退出 Kiro | `kiro-cli login` / `kiro-cli logout` |
 | Kiro 诊断 | `kiro-cli doctor` / `kiro-cli diagnostic` |
@@ -85,18 +124,34 @@ Detect continuation intent from signals like: "继续", "接着做", "上次那�
 
 **Step 2 — Find the right session to resume**
 
-Check for a live background process first:
+Check in this order (bridge first):
+
+**2a — Check for a running ACP bridge process (highest priority):**
 ```bash
 process action:list
 ```
-If a relevant Kiro process is still running → use `process action:submit` to send the follow-up into that session. Done.
+Look for a running `kiro-acp-bridge.js` process. If found → send the follow-up via `process action:submit` with a `send` or `reply` JSONL command to the bridge. Done.
 
-If no live process, check Kiro's saved sessions:
+**2b — Check for bridge state file (if no running bridge):**
+
+If no running bridge process, check if the bridge state file exists and has a valid session:
+```
+scripts/kiro-agent/scripts/kiro-acp-state.json
+```
+If a valid session is found → start a new bridge, send `start` + `session_load` to resume the session. Done.
+
+**2c — Check for other live background processes:**
+```bash
+process action:list
+```
+Look for other Kiro processes (non-bridge). If a relevant Kiro process is still running → use `process action:submit` to send the follow-up into that session. Done.
+
+**2d — Check Kiro saved sessions (fallback):**
 ```bash
 kiro-cli chat --list-sessions
 ```
 Then:
-- If **one obvious match** (same project, recent) → resume it: `kiro-cli chat --resume`
+- If **one obvious match** (same project, recent) → resume via bridge: start a new bridge, `session_load` the session
 - If **multiple candidates** → show the session list to the user and ask which one to resume, or offer `kiro-cli chat --resume-picker`
 - If **no matching session** → tell the user no prior session was found, confirm starting fresh
 
@@ -117,34 +172,90 @@ Present options:
 
 ## Launching Kiro tasks
 
-### One-shot (foreground, short tasks)
+### ACP bridge (unified default transport)
 
-```bash
-bash workdir:~/project command:"kiro-cli chat --no-interactive --trust-all-tools 'Your task here'"
-```
-
-### One-shot (background, long tasks) — preferred pattern
-
-```bash
-bash workdir:~/project background:true command:"bash ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-task-watcher.sh ~/project 'Your task description here'"
-```
-
-The watcher script (`kiro-task-watcher.sh`) handles all notification layers (L1+L2+L3) automatically. No extra setup needed.
-
-### ACP (multi-turn programmatic orchestration)
-
-```bash
-bash workdir:~/project background:true command:"kiro-cli acp --agent backend-specialist --model claude-opus-4.6 --trust-all-tools"
-```
-
-For the lightweight programmatic bridge: `node skills/kiro-agent/scripts/kiro-acp-bridge.js`
+The ACP bridge is the MANDATORY transport for **all** Kiro tasks — both one-shot and multi-turn. It provides session preservation, multi-turn support on every surface, and built-in L2+L3 notifications. There is no fallback — if bridge fails, that's a bug to fix.
 
 Bridge protocol details: [references/acp-bridge-protocol.md](references/acp-bridge-protocol.md)
 
+#### Multi-turn workflow via bridge
+
+**Step 1** — Launch bridge as background process:
+```bash
+bash workdir:~/project background:true command:"node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js"
+```
+
+**Step 2** — Send `start` command to launch the ACP process:
+```bash
+process action:submit sessionId:XXX input:'{"op":"start","agent":"kiro_default","model":"claude-opus-4.6","trustAllTools":true}'
+```
+
+**Step 3** — Confirm `ready` event:
+```bash
+process action:log sessionId:XXX
+```
+Look for `{"type":"ready",...}` in the output.
+
+**Step 4** — Create a new session:
+```bash
+process action:submit sessionId:XXX input:'{"op":"session_new","cwd":"/absolute/path/project"}'
+```
+
+**Step 5** — Send a prompt:
+```bash
+process action:submit sessionId:XXX input:'{"op":"send","session":"sess_xxx","text":"Your task here"}'
+```
+
+**Step 6** — Read `session_update` and `prompt_completed` events:
+```bash
+process action:log sessionId:XXX
+```
+Look for `{"type":"session_update",...}` (streaming progress) and `{"type":"prompt_completed",...}` (task finished).
+
+**Step 7** — For follow-ups, send more `send` or `reply` commands:
+```bash
+process action:submit sessionId:XXX input:'{"op":"send","session":"sess_xxx","text":"Now do this follow-up"}'
+```
+
+**Step 8** — To resume a previous session later:
+```bash
+process action:submit sessionId:XXX input:'{"op":"session_load","session":"sess_xxx","cwd":"/absolute/path/project"}'
+```
+
+**Step 9** — To stop the bridge:
+```bash
+process action:submit sessionId:XXX input:'{"op":"stop"}'
+```
+
+#### One-shot-via-bridge workflow
+
+Same as multi-turn but streamlined: `session_new` → `send` → wait for `prompt_completed` → `stop`.
+
+1. Launch bridge + send `start` + confirm `ready` (Steps 1–3 above)
+2. `session_new` to create a session
+3. `send` to send the prompt
+4. Wait for `prompt_completed` event via `process action:log`
+5. `stop` to shut down the bridge
+
+**Key advantage over CLI non-interactive:** the session is naturally preserved. If the user later says "继续上次的", you can start a new bridge and use `session_load` to resume — no context is lost. CLI non-interactive discards the session entirely.
+
+#### Bridge state and notifications
+
+- Bridge writes state to `scripts/kiro-agent/scripts/kiro-acp-state.json` (current pid, readiness, session IDs, cwd bindings)
+- Bridge has built-in L2+L3 notification via `openclaw system event` — fires on `prompt_completed` and on ACP process exit
+- Bridge auto-handles permissions: `allow_always` > `allow_once` > `cancelled`
+
 ### With a specific Kiro custom agent
 
+When using the bridge, specify the agent in the `start` command:
+
 ```bash
-bash workdir:~/project command:"kiro-cli chat --agent backend-specialist --no-interactive --trust-all-tools 'Your task'"
+process action:submit sessionId:XXX input:'{"op":"start","agent":"backend-specialist","model":"claude-opus-4.6","trustAllTools":true}'
+```
+
+On Desktop/Web only (where `sessions_spawn` is supported), you may alternatively use:
+```bash
+kiro-cli acp --agent backend-specialist --model claude-opus-4.6 --trust-all-tools
 ```
 
 ## After launching a background task

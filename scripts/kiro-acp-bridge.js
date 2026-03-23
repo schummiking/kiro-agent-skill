@@ -34,6 +34,9 @@ function notifyUser(text) {
   });
 }
 
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const startTime = Date.now();
+
 let nextId = 1;
 let acp = null;
 let acpReady = false;
@@ -41,6 +44,8 @@ let initializeResult = null;
 let pending = new Map();
 let currentSessionId = null;
 let sessions = {};
+let shuttingDown = false;
+let heartbeatTimer;
 
 function loadState() {
   try {
@@ -279,10 +284,43 @@ async function cancelSession({ session } = {}) {
   emit({ type: 'cancel_sent', session: sessionId });
 }
 
+async function gracefulShutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  clearInterval(heartbeatTimer);
+
+  emit({ type: 'shutdown', reason, session: currentSessionId, pid: acp?.pid || null });
+
+  if (acp && !acp.killed) {
+    acp.kill('SIGTERM');
+    await Promise.race([
+      new Promise(resolve => acp.on('exit', resolve)),
+      new Promise(resolve => setTimeout(resolve, 5000)),
+    ]);
+    if (!acp.killed) acp.kill('SIGKILL');
+  }
+
+  saveState();
+  notifyUser(`Bridge shutdown: ${reason} (session=${currentSessionId || 'none'})`);
+  process.exit(0);
+}
+
 function stopBridge() {
+  clearInterval(heartbeatTimer);
   emit({ type: 'stop_requested', session: currentSessionId, pid: acp?.pid || null });
   if (acp && !acp.killed) acp.kill('SIGTERM');
 }
+
+heartbeatTimer = setInterval(() => {
+  emit({
+    type: 'heartbeat',
+    pid: process.pid,
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    session: currentSessionId,
+    ready: acpReady,
+  });
+}, HEARTBEAT_INTERVAL_MS);
 
 loadState();
 
@@ -338,3 +376,10 @@ rl.on('line', async (line) => {
     emit({ type: 'bridge_error', op: msg.op, message: String(err?.message || err) });
   }
 });
+
+rl.on('close', () => {
+  emit({ type: 'info', message: 'stdin closed (EOF), bridge remains running via keepalive' });
+});
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

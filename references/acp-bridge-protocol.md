@@ -212,3 +212,63 @@ This event appears only when the `openclaw system event` call fails. Under norma
    - `prompt_completed`
 
 If that works, the bridge is ready for real Kiro skill integration.
+
+## OpenClaw integration workflow
+
+The bridge is designed to run as a background process managed by OpenClaw's `exec` + `process` tools. This is the standard way to use the bridge from the kiro-agent skill.
+
+### Multi-turn session
+
+```bash
+# 1. Launch bridge as background process
+bash workdir:~/project background:true command:"node ~/.openclaw/workspace/skills/kiro-agent/scripts/kiro-acp-bridge.js"
+
+# 2. Start ACP process
+process action:submit sessionId:XXX input:'{"op":"start","agent":"kiro_default","model":"claude-opus-4.6","trustAllTools":true}'
+
+# 3. Confirm ready
+process action:log sessionId:XXX
+# Look for: {"type":"ready",...}
+
+# 4. Create session
+process action:submit sessionId:XXX input:'{"op":"session_new","cwd":"/absolute/path/project"}'
+
+# 5. Send prompt
+process action:submit sessionId:XXX input:'{"op":"send","session":"sess_xxx","text":"Your task here"}'
+
+# 6. Read output
+process action:log sessionId:XXX
+# Look for: {"type":"session_update",...} and {"type":"prompt_completed",...}
+
+# 7. Follow-up prompts
+process action:submit sessionId:XXX input:'{"op":"send","session":"sess_xxx","text":"Follow-up task"}'
+
+# 8. Resume a previous session
+process action:submit sessionId:XXX input:'{"op":"session_load","session":"sess_xxx","cwd":"/absolute/path/project"}'
+
+# 9. Stop bridge
+process action:submit sessionId:XXX input:'{"op":"stop"}'
+```
+
+### One-shot-via-bridge
+
+Same flow but streamlined — session is preserved for potential follow-up:
+
+```bash
+# Launch + start + ready (steps 1-3 above)
+# Create session (step 4)
+# Send prompt (step 5)
+# Wait for prompt_completed (step 6)
+# Stop bridge (step 9)
+# Session is preserved — can be resumed later via session_load
+```
+
+### Why bridge is the only transport
+
+The ACP bridge is the **sole transport layer** for all Kiro tasks. There is no CLI fallback.
+
+- Bridge handles both one-shot and multi-turn scenarios
+- Sessions are always preserved — users can resume later via `session_load`
+- Built-in L2+L3 notifications via `openclaw system event`
+- Works on all surfaces (Desktop, Web, Telegram, etc.) — no surface dependency
+- If bridge fails, that's a bug to fix, not a scenario to work around
