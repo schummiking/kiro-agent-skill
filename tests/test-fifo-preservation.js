@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * Preservation Property Tests — JSONL Command Response Baseline
+ * FIFO Preservation Property Tests — stdio mode baseline behavior
  *
- * Verifies existing JSONL command behavior of scripts/kiro-acp-bridge.js.
- * These tests establish the baseline behavior that MUST be preserved after the fix.
+ * Verifies that stdio mode behavior is unchanged BEFORE implementing the FIFO fix.
+ * These tests establish the baseline that MUST be preserved after the fix.
  *
- * Each test spawns a fresh bridge process, sends a command via stdin,
- * reads stdout for the response, asserts the response matches expected format,
- * and cleans up the process.
+ * Each test spawns a fresh bridge process (default stdio mode), sends a command
+ * via stdin, reads stdout for the response, and asserts the response matches
+ * expected format.
  *
  * EXPECTED: All tests PASS on the current UNFIXED code.
  *
- * Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
+ * Validates: Requirements 2.5, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
  */
 
 const { spawn } = require('node:child_process');
@@ -24,7 +24,7 @@ const TIMEOUT_MS = 5000;
 const results = [];
 
 function log(msg) {
-  console.log(`[preservation] ${msg}`);
+  console.log(`[fifo-preservation] ${msg}`);
 }
 
 function record(name, passed, detail) {
@@ -48,7 +48,6 @@ function sendAndReceive(inputLine, timeoutMs = TIMEOUT_MS) {
 
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString();
-      // Check if we have a complete JSON line
       const lines = stdout.split('\n').filter((l) => l.trim());
       for (const line of lines) {
         try {
@@ -70,7 +69,6 @@ function sendAndReceive(inputLine, timeoutMs = TIMEOUT_MS) {
     child.on('exit', () => {
       if (!resolved) {
         resolved = true;
-        // Try to parse any remaining stdout
         const lines = stdout.split('\n').filter((l) => l.trim());
         for (const line of lines) {
           try {
@@ -96,7 +94,6 @@ function sendAndReceive(inputLine, timeoutMs = TIMEOUT_MS) {
 
     child.on('exit', () => clearTimeout(timer));
 
-    // Send the input line
     if (inputLine !== null) {
       child.stdin.write(inputLine + '\n');
     }
@@ -117,7 +114,6 @@ function sendAndExpectNoResponse(inputLine, waitMs = 2000) {
       stdout += chunk.toString();
     });
 
-    // Send the input line
     if (inputLine !== null) {
       child.stdin.write(inputLine + '\n');
     }
@@ -130,43 +126,112 @@ function sendAndExpectNoResponse(inputLine, waitMs = 2000) {
 }
 
 /**
- * Test 1: ping command
- * Send {"op":"ping"} → response type is "pong" with fields: pid, ready, session, initializeResult, sessions
- *
- * **Validates: Requirements 3.4**
+ * Helper: spawn bridge, collect all stdout events until timeout or exit.
+ * Sends SIGTERM after a delay to trigger graceful shutdown.
  */
-async function testPing() {
-  log('--- Test 1: ping command ---');
+function spawnAndSigterm(delayMs = 500, timeoutMs = TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [BRIDGE_PATH], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let resolved = false;
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    // Send SIGTERM after delay
+    setTimeout(() => {
+      child.kill('SIGTERM');
+    }, delayMs);
+
+    child.on('exit', () => {
+      if (!resolved) {
+        resolved = true;
+        const events = stdout
+          .split('\n')
+          .filter((l) => l.trim())
+          .map((l) => {
+            try { return JSON.parse(l); } catch { return null; }
+          })
+          .filter(Boolean);
+        resolve({ events, raw: stdout });
+      }
+    });
+
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        child.kill('SIGKILL');
+        const events = stdout
+          .split('\n')
+          .filter((l) => l.trim())
+          .map((l) => {
+            try { return JSON.parse(l); } catch { return null; }
+          })
+          .filter(Boolean);
+        resolve({ events, raw: stdout });
+      }
+    }, timeoutMs);
+
+    child.on('exit', () => clearTimeout(timer));
+  });
+}
+
+/**
+ * Test 1+7: ping response format AND no controlMode/controlPath fields
+ *
+ * Send {"op":"ping"} → verify response is
+ *   {"type":"pong","pid":null,"ready":false,"session":...,"initializeResult":null,"sessions":{}}
+ * AND verify response does NOT contain controlMode or controlPath fields (stdio mode preservation).
+ *
+ * **Validates: Requirements 2.5, 3.6**
+ */
+async function testPingResponseFormat() {
+  log('--- Test 1+7: ping response format & no controlMode/controlPath ---');
   const { response } = await sendAndReceive('{"op":"ping"}');
 
   if (!response) {
-    record('ping command', false, 'No response received');
+    record('ping response format', false, 'No response received');
     return;
   }
 
   const checks = [];
+
+  // Verify type
   if (response.type !== 'pong') checks.push(`type="${response.type}" (expected "pong")`);
-  if (!('pid' in response)) checks.push('missing "pid" field');
-  if (!('ready' in response)) checks.push('missing "ready" field');
+
+  // Verify expected fields exist with correct baseline values
+  if (response.pid !== null) checks.push(`pid=${response.pid} (expected null)`);
+  if (response.ready !== false) checks.push(`ready=${response.ready} (expected false)`);
   if (!('session' in response)) checks.push('missing "session" field');
-  if (!('initializeResult' in response)) checks.push('missing "initializeResult" field');
-  if (!('sessions' in response)) checks.push('missing "sessions" field');
+  if (response.initializeResult !== null) checks.push(`initializeResult=${JSON.stringify(response.initializeResult)} (expected null)`);
+  if (!('sessions' in response) || typeof response.sessions !== 'object') {
+    checks.push('missing or invalid "sessions" field');
+  }
+
+  // Verify NO controlMode or controlPath fields (stdio mode preservation)
+  if ('controlMode' in response) checks.push(`unexpected "controlMode" field: ${response.controlMode}`);
+  if ('controlPath' in response) checks.push(`unexpected "controlPath" field: ${response.controlPath}`);
 
   if (checks.length === 0) {
-    record('ping command', true, `type=pong, pid=${response.pid}, ready=${response.ready}`);
+    record('ping response format', true, 'type=pong, correct fields, no controlMode/controlPath');
   } else {
-    record('ping command', false, checks.join('; '));
+    record('ping response format', false, checks.join('; '));
   }
 }
 
 /**
- * Test 2: stop command (no ACP running)
- * Send {"op":"stop"} → response type is "stop_requested" with session and pid fields
+ * Test 2: stop command
  *
- * **Validates: Requirements 3.3**
+ * Send {"op":"stop"} → verify {"type":"stop_requested","session":...,"pid":null}
+ *
+ * **Validates: Requirements 3.1, 3.3**
  */
-async function testStop() {
-  log('--- Test 2: stop command (no ACP) ---');
+async function testStopCommand() {
+  log('--- Test 2: stop command ---');
   const { response } = await sendAndReceive('{"op":"stop"}');
 
   if (!response) {
@@ -188,7 +253,8 @@ async function testStop() {
 
 /**
  * Test 3: unknown op
- * Send {"op":"unknown_op"} → response type is "bridge_error" with message containing "unknown_op"
+ *
+ * Send {"op":"unknown_op"} → verify {"type":"bridge_error","message":"Unknown op: unknown_op"}
  *
  * **Validates: Requirements 3.1**
  */
@@ -203,8 +269,8 @@ async function testUnknownOp() {
 
   const checks = [];
   if (response.type !== 'bridge_error') checks.push(`type="${response.type}" (expected "bridge_error")`);
-  if (typeof response.message !== 'string' || !response.message.includes('unknown_op')) {
-    checks.push(`message="${response.message}" (expected to contain "unknown_op")`);
+  if (response.message !== 'Unknown op: unknown_op') {
+    checks.push(`message="${response.message}" (expected "Unknown op: unknown_op")`);
   }
 
   if (checks.length === 0) {
@@ -216,7 +282,8 @@ async function testUnknownOp() {
 
 /**
  * Test 4: invalid JSON
- * Send "not json" → response type is "bridge_error" with message "Invalid JSON input"
+ *
+ * Send "not json" → verify {"type":"bridge_error","message":"Invalid JSON input"}
  *
  * **Validates: Requirements 3.1**
  */
@@ -243,41 +310,39 @@ async function testInvalidJSON() {
 }
 
 /**
- * Test 5: send without ACP running (and no session)
- * Send {"op":"send","text":"hello"} → response type is "bridge_error"
- * Note: The bridge checks ACP readiness before session, so the actual error
- * on cold start is "ACP is not ready" (not "No session id").
- * This test captures the real baseline behavior via observation-first methodology.
+ * Test 5: send without ACP
+ *
+ * Send {"op":"send","text":"hello"} → verify {"type":"bridge_error","op":"send","message":"ACP is not ready"}
  *
  * **Validates: Requirements 3.1**
  */
-async function testSendWithoutSession() {
-  log('--- Test 5: send without ACP/session ---');
+async function testSendWithoutAcp() {
+  log('--- Test 5: send without ACP ---');
   const { response } = await sendAndReceive('{"op":"send","text":"hello"}');
 
   if (!response) {
-    record('send without session', false, 'No response received');
+    record('send without ACP', false, 'No response received');
     return;
   }
 
   const checks = [];
   if (response.type !== 'bridge_error') checks.push(`type="${response.type}" (expected "bridge_error")`);
-  // Bridge checks acpReady first, so without a running ACP the error is "ACP is not ready"
+  if (response.op !== 'send') checks.push(`op="${response.op}" (expected "send")`);
   if (typeof response.message !== 'string' || !response.message.includes('ACP is not ready')) {
     checks.push(`message="${response.message}" (expected to contain "ACP is not ready")`);
   }
-  if (!('op' in response)) checks.push('missing "op" field');
 
   if (checks.length === 0) {
-    record('send without session', true, `type=bridge_error, op=${response.op}, message="${response.message}"`);
+    record('send without ACP', true, `type=bridge_error, op=send, message="${response.message}"`);
   } else {
-    record('send without session', false, checks.join('; '));
+    record('send without ACP', false, checks.join('; '));
   }
 }
 
 /**
  * Test 6: empty line
- * Send empty line → no response (ignored)
+ *
+ * Send empty line → verify no response (line is ignored)
  *
  * **Validates: Requirements 3.1**
  */
@@ -285,9 +350,8 @@ async function testEmptyLine() {
   log('--- Test 6: empty line ---');
   const { raw } = await sendAndExpectNoResponse('');
 
-  // Filter out any heartbeat or other background events that might appear
-  // on fixed code — we only care that the empty line itself produces no response
   const lines = raw.split('\n').filter((l) => l.trim());
+  // Filter out heartbeat events that may appear during the wait
   const nonHeartbeatLines = lines.filter((l) => {
     try {
       const obj = JSON.parse(l);
@@ -300,20 +364,51 @@ async function testEmptyLine() {
   if (nonHeartbeatLines.length === 0) {
     record('empty line', true, 'No response for empty line (correct)');
   } else {
-    record('empty line', false, `Unexpected output: ${raw}`);
+    record('empty line', false, `Unexpected output: ${nonHeartbeatLines.join(', ')}`);
+  }
+}
+
+/**
+ * Test 8: SIGTERM graceful shutdown
+ *
+ * Send SIGTERM → verify {"type":"shutdown","reason":"SIGTERM",...} event is emitted
+ *
+ * **Validates: Requirements 3.3**
+ */
+async function testSigtermShutdown() {
+  log('--- Test 8: SIGTERM graceful shutdown ---');
+  const { events } = await spawnAndSigterm(500, TIMEOUT_MS);
+
+  const shutdownEvent = events.find((e) => e.type === 'shutdown');
+
+  if (!shutdownEvent) {
+    record('SIGTERM shutdown', false, `No shutdown event found. Events: ${JSON.stringify(events.map(e => e.type))}`);
+    return;
+  }
+
+  const checks = [];
+  if (shutdownEvent.reason !== 'SIGTERM') checks.push(`reason="${shutdownEvent.reason}" (expected "SIGTERM")`);
+  if (!('session' in shutdownEvent)) checks.push('missing "session" field');
+  if (!('pid' in shutdownEvent)) checks.push('missing "pid" field');
+
+  if (checks.length === 0) {
+    record('SIGTERM shutdown', true, `type=shutdown, reason=SIGTERM, session=${shutdownEvent.session}, pid=${shutdownEvent.pid}`);
+  } else {
+    record('SIGTERM shutdown', false, checks.join('; '));
   }
 }
 
 async function main() {
-  log('Starting preservation property tests on bridge');
+  log('Starting FIFO preservation property tests on bridge (stdio mode baseline)');
   log(`Bridge: ${BRIDGE_PATH}\n`);
 
-  await testPing();
-  await testStop();
+  await testPingResponseFormat();
+  await testStopCommand();
   await testUnknownOp();
   await testInvalidJSON();
-  await testSendWithoutSession();
+  await testSendWithoutAcp();
   await testEmptyLine();
+  await testSigtermShutdown();
 
   // Summary
   console.log('\n========== SUMMARY ==========');
@@ -326,10 +421,10 @@ async function main() {
   console.log('=============================\n');
 
   if (allPassed) {
-    log('All preservation tests passed — baseline behavior confirmed.');
+    log('All FIFO preservation tests passed — stdio mode baseline confirmed.');
     process.exit(0);
   } else {
-    log('Some preservation tests FAILED — baseline behavior not matching expectations.');
+    log('Some FIFO preservation tests FAILED — baseline behavior not matching expectations.');
     process.exit(1);
   }
 }

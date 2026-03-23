@@ -47,6 +47,24 @@ let sessions = {};
 let shuttingDown = false;
 let heartbeatTimer;
 
+function parseArgs(argv) {
+  let controlMode = 'stdio';
+  let controlPath = null;
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === '--control' && argv[i + 1]) {
+      controlMode = argv[++i];
+    } else if (argv[i] === '--control-path' && argv[i + 1]) {
+      controlPath = argv[++i];
+    }
+  }
+  if (controlMode === 'fifo' && !controlPath) {
+    controlPath = `/tmp/kiro-acp-bridge-${process.pid}.fifo`;
+  }
+  return { controlMode, controlPath };
+}
+
+const { controlMode, controlPath } = parseArgs(process.argv);
+
 function loadState() {
   try {
     const raw = fs.readFileSync(STATE_PATH, 'utf8');
@@ -290,6 +308,10 @@ async function gracefulShutdown(reason) {
 
   clearInterval(heartbeatTimer);
 
+  if (controlMode === 'fifo' && controlPath) {
+    try { fs.unlinkSync(controlPath); } catch {}
+  }
+
   emit({ type: 'shutdown', reason, session: currentSessionId, pid: acp?.pid || null });
 
   if (acp && !acp.killed) {
@@ -322,10 +344,7 @@ heartbeatTimer = setInterval(() => {
   });
 }, HEARTBEAT_INTERVAL_MS);
 
-loadState();
-
-const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-rl.on('line', async (line) => {
+async function processCommand(line) {
   if (!line.trim()) return;
   let msg;
   try {
@@ -359,27 +378,76 @@ rl.on('line', async (line) => {
       case 'stop':
         stopBridge();
         break;
-      case 'ping':
-        emit({
+      case 'ping': {
+        const pong = {
           type: 'pong',
           pid: acp?.pid || null,
           ready: acpReady,
           session: currentSessionId,
           initializeResult,
           sessions,
-        });
+        };
+        if (controlMode === 'fifo') {
+          pong.controlMode = controlMode;
+          pong.controlPath = controlPath;
+        }
+        emit(pong);
         break;
+      }
       default:
         emit({ type: 'bridge_error', message: `Unknown op: ${msg.op}` });
     }
   } catch (err) {
     emit({ type: 'bridge_error', op: msg.op, message: String(err?.message || err) });
   }
-});
+}
 
-rl.on('close', () => {
-  emit({ type: 'info', message: 'stdin closed (EOF), bridge remains running via keepalive' });
-});
+function setupFifoControl(fifoPath) {
+  require('node:child_process').execFileSync('mkfifo', [fifoPath]);
+
+  function openFifoReader() {
+    const stream = fs.createReadStream(fifoPath, { encoding: 'utf8' });
+    const fifoRl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+    fifoRl.on('line', (line) => processCommand(line));
+
+    fifoRl.on('close', () => {
+      stream.destroy();
+      emit({ type: 'info', message: 'FIFO EOF, reopening for next writer' });
+      setImmediate(() => openFifoReader());
+    });
+
+    stream.on('error', (err) => {
+      emit({ type: 'bridge_error', message: `FIFO read error: ${err.message}` });
+    });
+  }
+
+  openFifoReader();
+}
+
+loadState();
+
+if (controlMode === 'fifo') {
+  setupFifoControl(controlPath);
+  emit({ type: 'control_channel', mode: 'fifo', path: controlPath });
+} else {
+  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  rl.on('line', (line) => processCommand(line));
+  emit({ type: 'control_channel', mode: 'stdio' });
+  rl.on('close', () => {
+    emit({ type: 'info', message: 'stdin closed (EOF), bridge remains running via keepalive' });
+    // Auto-fallback: create FIFO control channel so bridge remains controllable
+    const fallbackPath = `/tmp/kiro-acp-bridge-${process.pid}.fifo`;
+    try {
+      setupFifoControl(fallbackPath);
+      emit({ type: 'control_channel', mode: 'fifo', path: fallbackPath });
+      // Self-diagnostic ping to prove bridge is still controllable
+      processCommand(JSON.stringify({ op: 'ping' }));
+    } catch (err) {
+      emit({ type: 'bridge_error', message: `FIFO fallback failed: ${err.message}` });
+    }
+  });
+}
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
