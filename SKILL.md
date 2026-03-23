@@ -283,16 +283,46 @@ On Desktop/Web only (where `sessions_spawn` is supported), you may alternatively
 kiro-cli acp --agent backend-specialist --model claude-opus-4.6 --trust-all-tools
 ```
 
-## After launching a background task
+## After launching a background task — progress reporting to user
+
+**Critical principle:** Push notifications (`openclaw system event`) from the bridge are best-effort. On Telegram, the OpenClaw agent is only active when the user sends a message or when it is explicitly polling. Therefore, you MUST NOT rely solely on push notifications — you MUST actively poll for results.
+
+### Multi-turn workflow: mandatory active polling
+
+After sending each prompt via FIFO (`op:send`), you MUST immediately enter a poll loop:
+
+1. **Poll immediately** after sending the prompt: `process action:log sessionId:XXX`
+2. **Check for `prompt_completed` event** in the log output
+3. If not found, **wait 10–15 seconds** and poll again
+4. **Repeat** until you see `prompt_completed` or an error event
+5. Once `prompt_completed` is found → read the result, summarize, and **report to the user in Telegram immediately**
+
+Do NOT send the prompt and then go silent waiting for a push notification. The push may never arrive.
+
+### One-shot and background tasks: scheduled polling
 
 1. Tell the user: task started, what it's doing, where (workdir)
 2. First poll within **2 minutes**, then every **5 minutes**
-3. If 3 consecutive polls show running but no new output → report "possibly stuck"
-4. On completion or meaningful progress → **deliver output as a report file** (see below)
+3. If 3 consecutive polls show running but no new output → report "possibly stuck" **to the user**
+4. On completion or meaningful progress → **deliver output as a report file to the user** (see below)
 5. If running **30 minutes** with no progress → notify user, ask for instructions
 6. On kill → tell user immediately with reason
 
 Monitor with: `process action:log/poll/kill sessionId:XXX`
+
+### Reporting target: always the user
+
+All progress reports, completion notifications, error alerts, and stuck warnings MUST be delivered to the **user** (via Telegram message or attachment). Internal logging does not count. The user must see the update in their Telegram chat.
+
+| Event | Action | Deliver to |
+| --- | --- | --- |
+| `prompt_completed` | Read log, summarize result | User (Telegram) |
+| Error / `bridge_error` | Report error clearly | User (Telegram) |
+| Kiro asks a question | Forward question to user | User (Telegram) |
+| 3 polls with no new output | Report "possibly stuck" | User (Telegram) |
+| 30 min no progress | Ask user for instructions | User (Telegram) |
+| Task killed / bridge died | Report immediately | User (Telegram) |
+| Routine poll, still running | Short status update | User (Telegram) — brief message only |
 
 ### Output delivery rule
 

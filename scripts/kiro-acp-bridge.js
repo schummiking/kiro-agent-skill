@@ -22,15 +22,38 @@ const path = require('node:path');
 
 const STATE_PATH = path.join(__dirname, 'kiro-acp-state.json');
 
-const { execFile } = require('node:child_process');
+const { execFile, execFileSync } = require('node:child_process');
 
 /**
- * Fire-and-forget notification to user via openclaw system event.
+ * Resolve the absolute path to the `openclaw` binary once at startup.
+ * In detached/setsid processes, PATH may not include the expected directories.
+ */
+let openclawBin = 'openclaw';
+try {
+  openclawBin = execFileSync('which', ['openclaw'], { encoding: 'utf8' }).trim() || 'openclaw';
+} catch {
+  // Fallback: try common locations
+  for (const candidate of ['/usr/local/bin/openclaw', `${process.env.HOME}/.local/bin/openclaw`]) {
+    try { fs.accessSync(candidate, fs.constants.X_OK); openclawBin = candidate; break; } catch {}
+  }
+}
+
+/**
+ * Notify user via openclaw system event with retry (up to 3 attempts, 5s apart).
  * This is the L2/L3 notification layer for the ACP path.
  */
-function notifyUser(text) {
-  execFile('openclaw', ['system', 'event', '--text', `Kiro: ${text}`, '--mode', 'now'], (err) => {
-    if (err) emit({ type: 'notify_error', message: `Failed to notify: ${err.message}` });
+function notifyUser(text, attempt = 1) {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 5_000;
+  execFile(openclawBin, ['system', 'event', '--text', `Kiro: ${text}`, '--mode', 'now'], (err) => {
+    if (err) {
+      emit({ type: 'notify_error', message: `Failed to notify (attempt ${attempt}/${MAX_RETRIES}): ${err.message}` });
+      if (attempt < MAX_RETRIES) {
+        setTimeout(() => notifyUser(text, attempt + 1), RETRY_DELAY_MS);
+      } else {
+        emit({ type: 'notify_error', message: `All ${MAX_RETRIES} notification attempts failed. User may not have been notified.` });
+      }
+    }
   });
 }
 

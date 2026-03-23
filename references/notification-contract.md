@@ -13,7 +13,18 @@ Every Kiro task launch must use at least L1 + L2. L3 and L4 add defense-in-depth
 | L1 — Prompt hook | Kiro's prompt includes `openclaw system event` on completion | Kiro subprocess | High |
 | L2 — Shell wrapper | `; openclaw system event ...` after Kiro invocation | Shell | High |
 | L3 — Watcher script | `kiro-task-watcher.sh` wraps Kiro, catches all exit paths | Shell wrapper | Very high |
-| L4 — Agent poll fallback | Agent polls `process action:poll` on schedule | OpenClaw agent | Medium |
+| L4 — Agent poll fallback | Agent polls `process action:log` on schedule | OpenClaw agent | Medium |
+| **L5 — Active poll loop** | **Agent polls `process action:log` immediately after each prompt, repeating until `prompt_completed`** | **OpenClaw agent** | **Very high** |
+
+### Telegram-specific limitations
+
+On Telegram, push notifications (L1–L3) are **unreliable** because:
+
+1. **PATH issues**: The bridge runs as a detached `setsid` process. The `openclaw` binary may not be in PATH. The bridge now resolves the absolute path at startup and retries 3 times on failure, but this is still best-effort.
+2. **Agent passivity**: The OpenClaw agent on Telegram is only active when the user sends a message or when it is executing a tool call chain. It cannot "wake up" on its own to process a push notification.
+3. **Context expiry**: If the OpenClaw conversation context has been compacted or the session has been idle for a long time, push events may be dropped.
+
+**Therefore, on Telegram, L5 (active poll loop) is the PRIMARY notification mechanism.** L1–L3 are defense-in-depth only. The agent MUST actively poll for results after sending each prompt — do not rely on push notifications arriving.
 
 ## How to launch with notification guarantees
 
